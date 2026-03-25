@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Any, Dict, List
 
 import streamlit as st
 
@@ -10,33 +11,20 @@ st.title("🐾 PawPal+")
 
 st.markdown(
     """
-Welcome to the PawPal+ starter app.
-
-This file is intentionally thin. It gives you a working Streamlit app so you can start quickly,
-but **it does not implement the project logic**. Your job is to design the system and build it.
-
-Use this app as your interactive demo once your backend classes/functions exist.
+**PawPal+** plans pet care for the day: it **ranks** tasks, **filters** what is feasible,
+builds a **timeline**, and **checks for time overlaps**. Use the panels below to register a profile,
+add tasks, inspect how the scheduler orders work, then generate a plan.
 """
 )
 
-with st.expander("Scenario", expanded=True):
+with st.expander("What the scheduler does", expanded=False):
     st.markdown(
         """
-**PawPal+** is a pet care planning assistant. It helps a pet owner plan care tasks
-for their pet(s) based on constraints like time, priority, and preferences.
-
-You will design and implement the scheduling logic and connect it to this Streamlit UI.
-"""
-    )
-
-with st.expander("What you need to build", expanded=True):
-    st.markdown(
-        """
-At minimum, your system should:
-- Represent pet care tasks (what needs to happen, how long it takes, priority)
-- Represent the pet and the owner (basic info and preferences)
-- Build a plan/schedule for a day that chooses and orders tasks based on constraints
-- Explain the plan (why each task was chosen and when it happens)
+- **Feasible tasks** — skips completed tasks, owner-excluded types, and tasks whose due window
+  conflicts with availability.
+- **Ranking** — orders by time-of-day hints, required vs optional, priority, then duration.
+- **Conflicts** — after building the plan, warns if any scheduled intervals overlap (should be
+  rare for the default sequential planner).
 """
     )
 
@@ -75,7 +63,7 @@ if st.session_state.owner and st.session_state.current_pet:
     )
 
 st.markdown("### Tasks")
-st.caption("Tasks are stored on your pet via `Pet.add_task` and used by the scheduler.")
+st.caption("Tasks live on the pet; the scheduler ranks and filters them when you preview or generate.")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -104,7 +92,7 @@ if st.button("Add task"):
         st.session_state.current_pet.add_task(task)
         st.success(f"Added “{task.title}” for {st.session_state.current_pet.name}.")
 
-tasks_for_display = []
+tasks_for_display: List[Dict[str, Any]] = []
 if st.session_state.owner and st.session_state.current_pet:
     for t in st.session_state.current_pet.get_tasks():
         tasks_for_display.append(
@@ -118,14 +106,66 @@ if st.session_state.owner and st.session_state.current_pet:
         )
 
 if tasks_for_display:
-    st.write("Current tasks:")
+    st.markdown("**Current tasks (as stored)**")
     st.table(tasks_for_display)
 else:
     st.info("No tasks yet. Register a pet and add one above.")
 
+# Scheduler preview: ranking + feasibility (Phase 3 logic surfaced in the UI)
+if st.session_state.owner and st.session_state.current_pet and st.session_state.current_pet.get_tasks():
+    owner = st.session_state.owner
+    pet = st.session_state.current_pet
+    scheduler = Scheduler(owner=owner, pet=pet, tasks=pet.get_tasks())
+
+    feasible = scheduler.filter_feasible_tasks()
+    feasible_ids = {id(t) for t in feasible}
+    pool = owner.get_all_tasks() or list(pet.get_tasks())
+    not_feasible = [t for t in pool if id(t) not in feasible_ids]
+
+    st.markdown("### Scheduling preview")
+    st.caption("Uses `Scheduler.filter_feasible_tasks` and `Scheduler.sort_or_rank_tasks`.")
+
+    st.success(
+        f"**{len(feasible)}** feasible task(s) for today — these are the ones the planner considers."
+    )
+    if not_feasible:
+        st.warning(
+            f"**{len(not_feasible)}** task(s) filtered out (completed, excluded type, or "
+            "due window vs owner availability)."
+        )
+        st.table(
+            [
+                {
+                    "title": t.title,
+                    "duration_minutes": t.duration_minutes,
+                    "priority": t.priority,
+                    "task_type": t.task_type,
+                    "completed": t.is_completed,
+                }
+                for t in not_feasible
+            ]
+        )
+
+    ranked_rows: List[Dict[str, Any]] = []
+    for i, t in enumerate(scheduler.sort_or_rank_tasks(), start=1):
+        ranked_rows.append(
+            {
+                "order": i,
+                "title": t.title,
+                "duration_min": t.duration_minutes,
+                "priority": t.priority,
+                "required": "yes" if t.is_required else "no",
+                "task_type": t.task_type,
+                "time_hint": t.time or "—",
+                "due_window": t.due_window or "—",
+            }
+        )
+    st.markdown("**Processing order** (how tasks will be considered when you generate a schedule)")
+    st.table(ranked_rows)
+
 st.divider()
 
-st.subheader("Build Schedule")
+st.subheader("Build schedule")
 st.caption("Uses `Scheduler.generate_plan` with your owner, pet, and tasks.")
 
 if st.button("Generate schedule"):
@@ -138,12 +178,43 @@ if st.button("Generate schedule"):
         pet = st.session_state.current_pet
         scheduler = Scheduler(owner=owner, pet=pet, tasks=pet.get_tasks())
         plan = scheduler.generate_plan(date.today())
-        st.success(f"Plan for **{plan.date.isoformat()}**")
+
+        st.success(f"Plan for **{plan.date.isoformat()}** · **{plan.total_minutes()}** min scheduled")
+
+        conflict_msg = scheduler.scheduling_conflict_warning(plan)
+        if conflict_msg:
+            st.warning(conflict_msg)
+        elif plan.scheduled_items:
+            st.success("No overlapping time slots detected — intervals look consistent.")
+
         if plan.scheduled_items:
+            st.markdown("**Timeline**")
             st.table(plan.to_display_rows())
+
+            explanations = scheduler.build_explanations(plan)
+            if explanations:
+                st.markdown("**Decisions**")
+                st.table(
+                    [{"task": title, "explanation": text} for title, text in explanations.items()]
+                )
         else:
             st.info("No tasks fit in the schedule with the current settings.")
+
         if plan.unscheduled_tasks:
             st.subheader("Unscheduled")
-            st.write([t.title for t in plan.unscheduled_tasks])
-        st.text(plan.explain())
+            st.table(
+                [
+                    {
+                        "title": t.title,
+                        "duration_min": t.duration_minutes,
+                        "priority": t.priority,
+                    }
+                    for t in plan.unscheduled_tasks
+                ]
+            )
+            st.warning(
+                f"{len(plan.unscheduled_tasks)} task(s) did not fit in the remaining time budget."
+            )
+
+        with st.expander("Full plan text"):
+            st.text(plan.explain())

@@ -22,16 +22,26 @@ Your final app should:
 - Display the plan clearly (and ideally explain the reasoning)
 - Include tests for the most important scheduling behaviors
 
-## Smarter Scheduling
+## Features
 
-The core logic in `pawpal_system.py` goes beyond a simple list of tasks:
+Algorithms and behaviors implemented in `pawpal_system.py` (and surfaced in `app.py` / `main.py`):
 
-- **Ranking** — Tasks are sorted for planning by time slot (`time` / `due_window`, including clock-style `HH:MM` and day parts), then required vs optional, priority, duration, and title for stable ties.
-- **Filtering** — `filter_care_tasks` and `Owner` / `Pet` `filter_tasks` narrow tasks by completion status and pet name (case-insensitive) without mutating the originals.
-- **Recurring care** — Marking a `daily` or `weekly` task complete can append the next occurrence with a `due_date` computed with `timedelta` (pass `pet=` to store it on the pet). Completed tasks are skipped when building a plan.
-- **Conflict awareness** — `Scheduler.detect_time_conflicts` finds overlapping scheduled intervals (half-open ranges so back-to-back slots are fine). `scheduling_conflict_warning` returns a short UI-safe string, or `None` if there are no overlaps.
+- **Greedy sequential scheduling** — `Scheduler.generate_plan` walks ranked tasks in order, places each on a single owner timeline starting at `rules["day_start"]` (default `08:00`), subtracts duration from remaining daily capacity, and pushes tasks that do not fit to `unscheduled_tasks` (no splitting or parallel tracks).
+- **Sorting by time** — `sort_or_rank_tasks` orders feasible tasks using `_task_time_sort_key`: explicit `HH:MM` times first (by minutes from midnight), then named day parts (`morning`, `afternoon`, …), then tasks with no time signal last; ties break with required-before-optional, higher `priority_score`, shorter duration, then title.
+- **Feasibility filtering** — `filter_feasible_tasks` drops completed tasks, task types listed in `owner.preferences["exclude_task_types"]`, and tasks whose `due_window` the owner cannot satisfy (`Owner.is_available`).
+- **Cross-pet task queries** — `Owner.get_all_tasks` aggregates tasks from every pet for scheduling and filtering.
+- **Task list filtering** — Module-level `filter_care_tasks` plus `Owner.filter_tasks` / `Pet.filter_tasks` narrow lists by completion flag and pet name (case-insensitive) without changing unrelated tasks.
+- **Conflict warnings** — `detect_time_conflicts` / `has_time_conflicts` compare scheduled intervals in minute space with half-open ranges (touching end-to-start is not an overlap). `scheduling_conflict_warning` formats a UI-safe summary or `None` when there are no overlaps (malformed times yield a generic warning instead of crashing).
+- **Plan explanations** — `DailyPlan.explain` and `Scheduler.build_explanations` produce human-readable text and per-task reasons for scheduled vs unscheduled outcomes.
+- **Daily / weekly recurrence** — `CareTask.mark_complete` is idempotent; for `frequency` `daily` or `weekly`, it clones the next instance with `due_date` advanced by `timedelta` (1 or 7 days) and optionally `Pet.add_task` to queue it. Completed tasks are excluded from new plans.
 
 Run `python main.py` for a terminal demo that exercises sorting, filtering, recurrence, and a sample overlap warning.
+
+## 📸 Demo
+
+Streamlit UI (`streamlit run app.py`): owner and pet registration, task list, scheduling preview (ranking and feasibility), and generated plan with timeline and explanations.
+
+<a href="/Users/robelbruk/Dev/codepath/intro-to-ai/pawpal+/images/streamlit_demo.png" target="_blank"><img src="/Users/robelbruk/Dev/codepath/intro-to-ai/pawpal+/images/streamlit_demo.png" title="PawPal App" width="" alt="PawPal App" class="center-block" /></a>
 
 ## Testing PawPal+
 
