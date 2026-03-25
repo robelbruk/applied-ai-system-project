@@ -33,6 +33,18 @@ The core logic in `pawpal_system.py` goes beyond a simple list of tasks:
 
 Run `python main.py` for a terminal demo that exercises sorting, filtering, recurrence, and a sample overlap warning.
 
+## Testing PawPal+
+
+Run the automated tests from the project root:
+
+```bash
+python -m pytest
+```
+
+The suite in `tests/test_pawpal.py` exercises core `pawpal_system` behavior: `CareTask.mark_complete` (including daily/weekly recurrence, idempotency, and non-recurring tasks), `filter_care_tasks` and owner-level task filtering, `Scheduler.sort_or_rank_tasks` (chronological ordering by time), `generate_plan` plus conflict detection (`detect_time_conflicts`, `has_time_conflicts`, duplicate and partial overlaps, adjacent non-overlapping slots), and `scheduling_conflict_warning` (including malformed times).
+
+**Confidence Level:** ★★★★☆ (4/5) — Core scheduling, filtering, recurrence, and overlap logic are covered by passing unit tests; the Streamlit UI and full end-to-end flows are not automated here.
+
 ## Getting started
 
 ### Setup

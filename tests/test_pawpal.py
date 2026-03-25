@@ -17,6 +17,44 @@ def test_task_mark_complete_updates_completion_status() -> None:
     assert task.is_completed is True
 
 
+def test_sort_or_rank_tasks_chronological_order() -> None:
+    """Feasible tasks are ordered by time-of-day (earlier clock times first)."""
+    owner = Owner(name="Alex", available_minutes_per_day=240)
+    dog = Pet(name="Buddy", species="Dog", age=3)
+    owner.add_pet(dog)
+    # Same duration, priority, and optional flag so ordering is driven by `time`.
+    dog.add_task(
+        CareTask(
+            title="Afternoon",
+            duration_minutes=10,
+            priority="medium",
+            task_type="general",
+            time="14:00",
+        )
+    )
+    dog.add_task(
+        CareTask(
+            title="Morning",
+            duration_minutes=10,
+            priority="medium",
+            task_type="general",
+            time="08:00",
+        )
+    )
+    dog.add_task(
+        CareTask(
+            title="Noon",
+            duration_minutes=10,
+            priority="medium",
+            task_type="general",
+            time="12:00",
+        )
+    )
+    sched = Scheduler(owner=owner, pet=dog, tasks=[])
+    ranked = sched.sort_or_rank_tasks()
+    assert [t.title for t in ranked] == ["Morning", "Noon", "Afternoon"]
+
+
 def test_daily_mark_complete_appends_next_occurrence_with_due_date() -> None:
     pet = Pet(name="Buddy", species="Dog", age=4)
     task = CareTask(
@@ -65,6 +103,27 @@ def test_mark_complete_without_recurring_frequency_returns_none() -> None:
     )
     assert task.mark_complete() is None
     assert task.is_completed is True
+
+
+def test_recurrence_daily_mark_complete_creates_task_for_following_day() -> None:
+    """Marking a daily task complete yields a new instance due the next calendar day."""
+    pet = Pet(name="Coco", species="Rabbit", age=1)
+    task = CareTask(
+        title="Hay refill",
+        duration_minutes=10,
+        priority="medium",
+        task_type="feeding",
+        frequency="daily",
+    )
+    pet.add_task(task)
+    completion = date(2025, 12, 31)
+    new_task = task.mark_complete(pet=pet, as_of=completion)
+
+    assert new_task is not None
+    assert new_task.is_completed is False
+    assert new_task.frequency.strip().lower() == "daily"
+    assert new_task.due_date == date(2026, 1, 1)
+    assert len(pet.get_tasks()) == 2
 
 
 def test_mark_complete_idempotent_no_duplicate_next_tasks() -> None:
@@ -204,6 +263,22 @@ def test_detect_time_conflicts_adjacent_slots_do_not_overlap() -> None:
     owner = Owner(name="x", available_minutes_per_day=60)
     sched = Scheduler(owner=owner, pet=Pet(name="p", species="Dog", age=1), tasks=[])
     assert sched.detect_time_conflicts(plan) == []
+
+
+def test_detect_time_conflicts_duplicate_identical_slots() -> None:
+    """Scheduler reports a conflict when two items use the same start and end times."""
+    plan = DailyPlan(date=date(2025, 1, 1))
+    t1 = CareTask(title="Walk", duration_minutes=30, priority="low", task_type="exercise")
+    t2 = CareTask(title="Train", duration_minutes=30, priority="low", task_type="training")
+    plan.add_item(t1, "09:00", "09:30", "")
+    plan.add_item(t2, "09:00", "09:30", "")
+    owner = Owner(name="x", available_minutes_per_day=120)
+    sched = Scheduler(owner=owner, pet=Pet(name="p", species="Dog", age=1), tasks=[])
+    assert sched.has_time_conflicts(plan) is True
+    conflicts = sched.detect_time_conflicts(plan)
+    assert len(conflicts) == 1
+    titles = {conflicts[0].first.task.title, conflicts[0].second.task.title}
+    assert titles == {"Walk", "Train"}
 
 
 def test_detect_time_conflicts_overlapping_tasks_same_or_different_pet() -> None:
