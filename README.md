@@ -276,7 +276,7 @@ because Gemma output is non-deterministic at `temperature=0.1`.
 ## Demo
 
 <!-- Replace with your Loom link after recording -->
-**Loom walkthrough:** _TODO — record before submission._
+**Loom walkthrough:** https://www.loom.com/share/82a0bf1bede74b0fa3bac52455935f5a
 
 **Suggested Loom beats (3–5 min):**
 1. Baseline app with a pet registered, no tasks (~10 s).
