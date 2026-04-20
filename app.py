@@ -1,9 +1,13 @@
+import os
 from datetime import date
 from typing import Any, Dict, List
 
 import streamlit as st
 
 from pawpal_system import CareTask, Owner, Pet, Scheduler
+
+# Side-effect import: loads .env (HF_TOKEN, etc.) before any AI module is touched.
+import ai  # noqa: F401
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -34,6 +38,10 @@ if "owner" not in st.session_state:
     st.session_state.owner = None
 if "current_pet" not in st.session_state:
     st.session_state.current_pet = None
+if "architect_trace" not in st.session_state:
+    st.session_state.architect_trace = None
+if "ai_flash" not in st.session_state:
+    st.session_state.ai_flash = None
 
 st.subheader("Owner & pet")
 st.caption("Register once, then add tasks below. Data is kept in `st.session_state` across reruns.")
@@ -62,6 +70,177 @@ if st.session_state.owner and st.session_state.current_pet:
         f"**{p.name}** ({p.species}, age {p.age})"
     )
 
+st.divider()
+st.subheader("🤖 Describe your day (Care Plan Architect)")
+st.caption(
+    "Paste a natural-language description. The architect extracts structured tasks, "
+    "validates them, previews a schedule, and runs a self-critique — all without modifying "
+    "your saved tasks below."
+)
+
+if st.session_state.ai_flash:
+    st.success(st.session_state.ai_flash)
+    st.session_state.ai_flash = None
+
+if not os.environ.get("HF_TOKEN"):
+    st.warning(
+        "`HF_TOKEN` is not set. Copy `.env.example` to `.env` and add your Hugging Face token "
+        "to enable the AI intake (the manual form below still works)."
+    )
+else:
+    nl_default = (
+        "My dog Buddy needs a 25-min morning walk and breakfast at 8am (required). "
+        "Mochi the cat should get a 15-min evening brushing."
+    )
+    nl_text = st.text_area("What does today look like?", value=nl_default, height=120)
+
+    if st.button("🪄 Draft plan with AI"):
+        if st.session_state.owner is None or st.session_state.current_pet is None:
+            st.error("Register an owner and pet first.")
+        else:
+            # Clone owner + pet into disposable objects so architect doesn't mutate
+            # the session-state pet's task list. Saved tasks come from the explicit
+            # commit step below.
+            real_owner = st.session_state.owner
+            real_pet = st.session_state.current_pet
+            tmp_owner = Owner(
+                name=real_owner.name,
+                available_minutes_per_day=real_owner.get_daily_capacity(),
+                preferences=dict(real_owner.preferences),
+            )
+            tmp_pet = Pet(
+                name=real_pet.name,
+                species=real_pet.species,
+                age=real_pet.age,
+                special_needs=list(real_pet.special_needs),
+            )
+            tmp_owner.add_pet(tmp_pet)
+
+            with st.spinner("Calling the architect..."):
+                from ai.architect import CarePlanArchitect
+
+                try:
+                    architect = CarePlanArchitect()
+                    trace = architect.run(nl_text, tmp_owner, tmp_pet)
+                except Exception as exc:  # network, auth, etc.
+                    st.error(f"Architect call failed: {exc}")
+                    trace = None
+
+            if trace is not None:
+                # Clear any stale per-draft selection toggles from a previous run.
+                for key in [k for k in st.session_state if k.startswith("draft_select_")]:
+                    del st.session_state[key]
+                st.session_state.architect_trace = trace
+
+    # Render the persisted trace across reruns so Save/Discard can act on it.
+    trace = st.session_state.architect_trace
+    if trace is not None:
+        if trace.error:
+            st.error(f"Architect error: {trace.error}")
+
+        if trace.critic is not None:
+            conf = trace.critic.confidence
+            if conf >= 0.8:
+                st.success(f"Critic confidence: {conf:.2f} ✅")
+            elif conf >= 0.5:
+                st.warning(f"Critic confidence: {conf:.2f} ⚠️")
+            else:
+                st.error(f"Critic confidence: {conf:.2f} ❌")
+
+        active_pet = st.session_state.current_pet
+        if trace.drafts:
+            st.markdown(
+                f"**Drafted tasks** — select which to save to **{active_pet.name}** if you like the plan."
+            )
+            st.caption(
+                "All drafts are selected by default. Saving coerces each task's pet to the active pet."
+            )
+            for i, d in enumerate(trace.drafts):
+                when = d.time or d.due_window or "anytime"
+                pet_label = (
+                    f"→ {d.pet_name}"
+                    if d.pet_name and d.pet_name.lower() != active_pet.name.lower()
+                    else ""
+                )
+                label = (
+                    f"**{d.title}** · {d.duration_minutes} min · "
+                    f"{d.priority} · {d.task_type} · {when}"
+                    f"{' · required' if d.is_required else ''}"
+                    f"{' · ' + pet_label if pet_label else ''}"
+                )
+                st.checkbox(label, value=True, key=f"draft_select_{i}")
+
+        if trace.validation_errors:
+            st.markdown("**Validation issues** (auto-recovered via retry if possible)")
+            for err in trace.validation_errors:
+                st.code(err, language="text")
+
+        if trace.plan and trace.plan.scheduled_items:
+            st.markdown("**Previewed schedule**")
+            st.table(trace.plan.to_display_rows())
+            if trace.conflict_warning:
+                st.warning(trace.conflict_warning)
+            else:
+                st.success("No scheduling conflicts detected.")
+        elif trace.plan and not trace.plan.scheduled_items:
+            st.info("Plan generated but no tasks fit in the owner's capacity.")
+
+        if trace.critic is not None and trace.critic.issues:
+            st.markdown("**Critic report**")
+            st.table(
+                [
+                    {
+                        "severity": i.severity,
+                        "category": i.category,
+                        "message": i.message,
+                    }
+                    for i in trace.critic.issues
+                ]
+            )
+
+        with st.expander("Raw LLM output + retry count", expanded=False):
+            st.caption(f"retries: {trace.retry_count}")
+            st.code(trace.raw_llm_output or "(empty)", language="json")
+
+        if trace.drafts and active_pet is not None:
+            selected_indices = [
+                i
+                for i in range(len(trace.drafts))
+                if st.session_state.get(f"draft_select_{i}", True)
+            ]
+            save_col, discard_col = st.columns([3, 1])
+            save_clicked = save_col.button(
+                f"💾 Save {len(selected_indices)} of {len(trace.drafts)} task(s) to {active_pet.name}",
+                disabled=len(selected_indices) == 0,
+                type="primary",
+            )
+            discard_clicked = discard_col.button("🗑️ Discard draft")
+
+            if save_clicked:
+                saved = 0
+                for i in selected_indices:
+                    draft = trace.drafts[i]
+                    task = draft.to_care_task()
+                    task.pet_name = active_pet.name
+                    active_pet.add_task(task)
+                    saved += 1
+                st.session_state.architect_trace = None
+                for key in [k for k in st.session_state if k.startswith("draft_select_")]:
+                    del st.session_state[key]
+                st.session_state.ai_flash = (
+                    f"Added {saved} AI-drafted task(s) to {active_pet.name}. "
+                    "Scroll down to generate a schedule."
+                )
+                st.rerun()
+
+            if discard_clicked:
+                st.session_state.architect_trace = None
+                for key in [k for k in st.session_state if k.startswith("draft_select_")]:
+                    del st.session_state[key]
+                st.session_state.ai_flash = "Discarded the AI draft."
+                st.rerun()
+
+st.divider()
 st.markdown("### Tasks")
 st.caption("Tasks live on the pet; the scheduler ranks and filters them when you preview or generate.")
 

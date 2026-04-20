@@ -1,3 +1,4 @@
+import os
 from datetime import date
 
 from pawpal_system import CareTask, DailyPlan, Owner, Pet, Scheduler
@@ -200,6 +201,66 @@ def print_demo(owner: Owner, pets: list[Pet], tasks: list[CareTask]) -> None:
     print(f"(has_time_conflicts: {scheduler.has_time_conflicts(overlap_plan)})")
 
 
+def demo_architect() -> None:
+    """Run the Care Plan Architect on a canned NL prompt.
+
+    Skipped gracefully if HF_TOKEN is not set so the rest of the demo still
+    works in environments without the API key.
+    """
+    if not os.environ.get("HF_TOKEN"):
+        print("Care Plan Architect demo skipped (HF_TOKEN not set).")
+        print("Set HF_TOKEN to run: https://huggingface.co/settings/tokens")
+        print()
+        return
+
+    from ai.architect import CarePlanArchitect
+
+    prompt = (
+        "My dog Buddy needs a 25-min morning walk and breakfast at 8am (required). "
+        "Mochi the cat should get a 15-min evening brushing."
+    )
+    owner = Owner(name="Jordan", available_minutes_per_day=120)
+    pet = Pet(name="Buddy", species="Dog", age=4)
+    owner.add_pet(pet)
+
+    print("Care Plan Architect demo")
+    print(f"Input: {prompt}")
+    print()
+
+    architect = CarePlanArchitect()
+    trace = architect.run(prompt, owner, pet)
+
+    if trace.error:
+        print(f"Architect failed: {trace.error}")
+        for err in trace.validation_errors:
+            print(f"  - {err}")
+        return
+
+    print(f"Extracted {len(trace.drafts)} task(s) (retries: {trace.retry_count}):")
+    for draft in trace.drafts:
+        when = draft.time or draft.due_window or "anytime"
+        print(
+            f"  - {draft.title} [{draft.priority}/{draft.task_type}] "
+            f"{draft.duration_minutes} min @ {when}"
+            f"{' (required)' if draft.is_required else ''}"
+        )
+    print()
+
+    if trace.plan:
+        print(f"Schedule for {trace.plan.date.isoformat()}")
+        for item in trace.plan.scheduled_items:
+            print(
+                f"  - {item.start_time}-{item.end_time}: {item.task.title} "
+                f"for {item.task.pet_name}"
+            )
+        if trace.conflict_warning:
+            print(trace.conflict_warning)
+        else:
+            print("No scheduling conflicts detected.")
+    print()
+
+
 if __name__ == "__main__":
     demo_owner, demo_pets, demo_tasks = build_demo_data()
     print_demo(demo_owner, demo_pets, demo_tasks)
+    demo_architect()

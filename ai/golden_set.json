@@ -1,0 +1,144 @@
+{
+  "description": "Golden set for the Care Plan Architect. Each case provides a natural-language input and a list of expected extracted tasks with field-level assertions. `match_keywords` locates the draft (all keywords must appear in the title, case-insensitive); `fields` are checked exactly (case-insensitive for strings).",
+  "cases": [
+    {
+      "id": "walk_breakfast_brush",
+      "input": "Buddy the dog needs a 25-min morning walk and breakfast at 8am (required). Mochi the cat should get a 15-min evening brushing.",
+      "owner": {"name": "Jordan", "minutes_per_day": 120},
+      "pet": {"name": "Buddy", "species": "Dog", "age": 4},
+      "expected_tasks": [
+        {
+          "match_keywords": ["walk"],
+          "fields": {
+            "duration_minutes": 25,
+            "task_type": "exercise",
+            "due_window": "morning",
+            "pet_name": "Buddy"
+          }
+        },
+        {
+          "match_keywords": ["breakfast"],
+          "fields": {
+            "task_type": "feeding",
+            "time": "08:00",
+            "is_required": true,
+            "pet_name": "Buddy"
+          }
+        },
+        {
+          "match_keywords": ["brush"],
+          "fields": {
+            "duration_minutes": 15,
+            "task_type": "grooming",
+            "due_window": "evening",
+            "pet_name": "Mochi"
+          }
+        }
+      ]
+    },
+    {
+      "id": "simple_walk",
+      "input": "Walk Buddy for 20 minutes in the morning.",
+      "owner": {"name": "Jordan", "minutes_per_day": 60},
+      "pet": {"name": "Buddy", "species": "Dog", "age": 3},
+      "expected_tasks": [
+        {
+          "match_keywords": ["walk"],
+          "fields": {
+            "duration_minutes": 20,
+            "task_type": "exercise",
+            "due_window": "morning",
+            "pet_name": "Buddy"
+          }
+        }
+      ]
+    },
+    {
+      "id": "meds_vet",
+      "input": "Give Rex his heartworm meds at 7am — don't skip it. Vet checkup at 2:30pm for 45 minutes.",
+      "owner": {"name": "Sam", "minutes_per_day": 180},
+      "pet": {"name": "Rex", "species": "Dog", "age": 8},
+      "expected_tasks": [
+        {
+          "match_keywords": ["med"],
+          "fields": {
+            "task_type": "medical",
+            "time": "07:00",
+            "is_required": true,
+            "pet_name": "Rex"
+          }
+        },
+        {
+          "match_keywords": ["vet"],
+          "fields": {
+            "task_type": "medical",
+            "time": "14:30",
+            "duration_minutes": 45,
+            "pet_name": "Rex"
+          }
+        }
+      ]
+    },
+    {
+      "id": "weekly_nail_trim",
+      "input": "Trim Mochi's nails once a week, 20 minutes.",
+      "owner": {"name": "Sam", "minutes_per_day": 60},
+      "pet": {"name": "Mochi", "species": "Cat", "age": 2},
+      "expected_tasks": [
+        {
+          "match_keywords": ["nail"],
+          "fields": {
+            "duration_minutes": 20,
+            "task_type": "grooming",
+            "frequency": "weekly",
+            "pet_name": "Mochi"
+          }
+        }
+      ]
+    },
+    {
+      "id": "two_meals",
+      "input": "Feed Buddy breakfast at 7am (10 min) and dinner at 6pm (10 min). Both required.",
+      "owner": {"name": "Alex", "minutes_per_day": 90},
+      "pet": {"name": "Buddy", "species": "Dog", "age": 5},
+      "expected_tasks": [
+        {
+          "match_keywords": ["breakfast"],
+          "fields": {
+            "task_type": "feeding",
+            "time": "07:00",
+            "duration_minutes": 10,
+            "is_required": true
+          }
+        },
+        {
+          "match_keywords": ["dinner"],
+          "fields": {
+            "task_type": "feeding",
+            "time": "18:00",
+            "duration_minutes": 10,
+            "is_required": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "training_session",
+      "input": "30-minute training session with Rex in the afternoon, medium priority.",
+      "owner": {"name": "Alex", "minutes_per_day": 60},
+      "pet": {"name": "Rex", "species": "Dog", "age": 2},
+      "expected_tasks": [
+        {
+          "match_keywords": ["training"],
+          "fields": {
+            "duration_minutes": 30,
+            "task_type": "training",
+            "priority": "medium",
+            "due_window": "afternoon",
+            "pet_name": "Rex"
+          }
+        }
+      ]
+    }
+  ]
+}

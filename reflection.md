@@ -1,139 +1,202 @@
-# PawPal+ Project Reflection
+# PawPal+ Care Plan Architect — Capstone Reflection
 
-## 1. System Design
-- Core User Actions
-    - Enter basic owner + pet info
-    - Add/edit care tasks (with at least duration and priority)
-    - Generate a daily schedule/plan based on constraints and priorities
+> This reflection covers the **Applied AI System capstone**: extending my
+> Module 2 PawPal+ scheduler with a natural-language intake layer (the
+> Care Plan Architect). For scope, limits, biases, misuse, and model-level
+> details, see `model_card.md`. This file is about the **process** — how the
+> extension was designed, where AI collaboration helped or misled, what I
+> tested, and what I learned as the lead architect.
+
+## 1. System Design (extension)
 
 **a. Initial design**
 
-- Briefly describe your initial UML design.
-  - My initial UML used six classes: `Owner`, `Pet`, `CareTask`, `Scheduler`, `DailyPlan`, and `PlanItem`. I separated "data holder" classes (`Pet`, `CareTask`, `PlanItem`) from orchestration/output classes (`Scheduler`, `DailyPlan`) so scheduling logic stayed centralized instead of scattered.
-- What classes did you include, and what responsibilities did you assign to each?
-  - `Owner`: stores owner-level constraints (name, available daily minutes, preferences) and provides availability/capacity helpers.
-  - `Pet`: stores pet profile data (name, species, age, special needs) and exposes methods that describe care requirements.
-  - `CareTask`: represents one care action with duration, priority, type, and scheduling metadata.
-  - `Scheduler`: orchestrates filtering feasible tasks, ranking tasks, and generating a `DailyPlan`.
-  - `DailyPlan`: stores one day's output, including scheduled and unscheduled tasks, plus display/explanation helpers.
-  - `PlanItem`: models one scheduled entry (task + time range + reason) so each scheduled decision is explicit and explainable.
+- What did I start from, and what did I add?
+  - I started from the Module 2 PawPal+ scheduler (`pawpal_system.py`) and
+    **did not modify any of its classes**. The extension is a new `ai/`
+    package with five modules: `prompts`, `client`, `validators`,
+    `architect`, `critic`, plus `config` for env loading and `evaluator`
+    + `golden_set.json` for testing.
+  - The design principle was **"LLM as intake adapter, not rewrite."**
+    The architect sits *in front of* `Scheduler.generate_plan`: natural
+    language goes in, validated `CareTask` objects come out, and the
+    original greedy scheduler runs exactly as it always has.
+- Which components are new, and where do they sit in the data flow?
+  - `ai/architect.py`: orchestrates `parse → Pydantic validate →
+    repair-retry (once) → attach to Pet → call Scheduler → critic review`.
+  - `ai/validators.py`: a Pydantic `TaskDraft` model with enums
+    (priority / task_type / frequency / due_window), `1 ≤ duration ≤ 240`,
+    and an `HH:MM` regex. This is the real guardrail — the LLM cannot emit
+    a task that violates the schema and reach the scheduler.
+  - `ai/client.py`: a thin wrapper around the Hugging Face
+    `InferenceClient`, pinned to `google/gemma-4-31B-it:novita`.
+  - `ai/critic.py`: a **deterministic** heuristic reviewer that scores
+    confidence 0–1 and flags coverage/plan issues as `info` / `warning` /
+    `error`.
+  - `ai/trace.py`: an `ArchitectTrace` dataclass that records every stage
+    so the UI can show *what happened* even when a later step failed.
 
 **b. Design changes**
-- Did your design change during implementation?
-    - Yes. I made two design updates after reviewing the skeleton
-- If yes, describe at least one change and why you made it.
-    - I added `Owner.pets` and an `add_pet()` method to explicitly model the owner-to-pet relationship instead of assuming a single pet forever.
-    - I added `CareTask.pet_name` so tasks can be tied to a specific pet, which prevents ambiguity if the app expands to multi-pet scheduling.
-    - I removed `DailyPlan.total_minutes` as a stored field and replaced it with a `total_minutes()` method to avoid state drift between `scheduled_items` and a manually maintained total.
-    - These changes make the model safer to evolve and reduce avoidable consistency bugs in scheduling logic.
 
----
+- Did the design change during implementation?
+  - Yes — three changes worth calling out.
+- What changed and why?
+  - I added a **`.env` + `ai/config.py`** setup after Phase 1 so `HF_TOKEN`
+    could live in an ignored file instead of the shell. `python-dotenv`
+    loads it on `import ai`, and real shell vars still win (`override=False`)
+    so CI secrets work.
+  - I moved the Streamlit **preview rendering out of the button click block**
+    and persisted the `ArchitectTrace` in `st.session_state`. This unlocked
+    the per-draft **Save / Discard** flow — without it, a draft couldn't
+    survive the script rerun that Streamlit triggers on every button click.
+  - I **coerced `draft.pet_name` to the active pet on save**. The architect
+    can emit names for multiple pets (Buddy, Mochi), but the current UI is
+    single-pet, and silent coercion is less surprising than a failure path.
 
-## 2. Scheduling Logic and Tradeoffs
+## 2. AI Feature and Tradeoffs
 
-**a. Constraints and priorities**
+**a. Structured prompting + Pydantic over native tool use**
 
-- What constraints does your scheduler consider (for example: time, priority, preferences)?
-  - **Owner capacity:** total minutes available per day (`Owner.get_daily_capacity`), consumed as tasks are placed sequentially.
-  - **Task feasibility:** completed tasks are skipped; `owner.preferences["exclude_task_types"]` can drop whole categories; if a task has a `due_window`, the owner must be available for that slot (`Owner.is_available`).
-  - **Ranking order:** after feasibility, tasks are sorted by time signal (`_task_time_sort_key`: clock `HH:MM`, then day-part labels like morning/evening, then untimed tasks), then required before optional, then higher `priority_score`, then shorter duration, then title for stable ties.
-  - **Single timeline:** `generate_plan` starts at `rules["day_start"]` (default `08:00`) and chains tasks back-to-back until capacity runs out; leftovers go to `unscheduled_tasks`.
+- Why this path?
+  - Gemma does not have strong native tool-use fine-tuning. Pretending it
+    does would have made the prompt brittle and the failure modes
+    invisible. Prompted JSON + strict Pydantic + a **visible repair
+    retry** puts the reliability story in the foreground, which is also a
+    better fit for the rubric's "reliability/guardrail component" criterion.
+- What is the tradeoff?
+  - I lose provider-native schema enforcement (which a tool-use API can
+    give you) and pay that back in parsing code: markdown-fence stripping,
+    object extraction from prose, `{"tasks": [...]}` vs bare-list handling.
+    That code is short and tested, and the upside is that swapping Gemma
+    for any chat-completion-compatible model is a one-line change in
+    `client.py`.
 
-- How did you decide which constraints mattered most?
-  - **Feasibility first** — there is no point ordering tasks that should never run today (completed, excluded type, or impossible window).
-  - **Time hints second** — matching “morning” before “evening” makes the plan feel like a real day.
-  - **Priority and duration** — break ties in a way that favors urgent work and packs smaller tasks when scores tie, which fits the greedy layout.
+**b. Heuristic critic over a second LLM call**
 
-**b. Tradeoffs**
-
-- **Describe one tradeoff your scheduler makes.**
-
-  - The main tradeoff is **sequential single-line scheduling**: `generate_plan` walks the ranked task list and places each task **immediately after** the previous one on **one** owner timeline (`day_start` → …). It does not allocate **parallel** tracks (e.g., two pets at once with help, or overlapping real-world windows). That keeps the implementation small and the output easy to read, but it **forces a strict order** and may **serialize** work that could overlap in practice. (Note: **conflict detection** is different—it compares **intervals** (`start`–`end`) and flags **overlapping durations**, not “exact same timestamp” only; half-open ranges mean **back-to-back** slots are not treated as conflicts. The default generator never produces overlaps, so that check is mainly for **manual or merged** plans.)
-
-- **Why is that tradeoff reasonable for this scenario?**
-  - For this project, **one owner** and **one daily minute budget** are the core constraints; a single ordered queue matches that story and is straightforward to test and print. A richer model (parallel resources, travel time, multiple caregivers) would be better for production but is heavier than needed here.
-
----
+- Why this path?
+  - A second LLM critic would be slower, more expensive, non-deterministic,
+    and harder to unit-test. A heuristic critic is cheap, each deduction
+    traces to a named check (empty drafts → error, short input → warning,
+    unscheduled tasks → warning, clock-time/pet coverage → info), and the
+    confidence score is reproducible for the same input.
+- What does the heuristic critic **not** catch?
+  - Semantic wrongness. A plausible-looking but wrong schedule can still
+    score high confidence. That is why the Streamlit save flow requires
+    **explicit per-draft human approval** — the critic is advisory; the
+    checkbox is the trust boundary.
 
 ## 3. AI Collaboration
 
-**a. How you used AI**
+**a. How I used Claude Code across phases**
 
-- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
-  - I used AI for **brainstorming** class boundaries and naming, **drafting** docstrings and repetitive tests, **spot-checking** edge cases (e.g. interval overlap rules, midnight wrap), and **refactoring** when I wanted cleaner names without changing behavior.
-- What kinds of prompts or questions were most helpful?
-  - Prompts that **named the file and function** and asked for behavior **without** rewriting architecture (“explain how half-open intervals apply to `PlanItem` times”) worked better than open-ended “write my scheduler” requests.
-  - Asking for **pytest cases** from a short scenario (“two tasks, overlapping times, expect one conflict”) was faster than writing assertions from scratch.
+- Phase 1 (scaffolding): I gave Claude the repo and asked for an audit
+  before any code — file-by-file breakdown, extension options ranked by
+  rubric fit and demo quality. That planning conversation shaped the
+  "intake adapter" scoping decision I kept throughout.
+- Phase 2 (reliability): I directed Claude to build the critic
+  *deterministically* instead of as a second LLM call, and to wire a
+  golden-set evaluator with field-level diffs. I also asked for the
+  per-draft save flow and specified the session-state mechanics so the
+  Streamlit rerun loop would behave.
+- Phase 3 (docs): Claude drafted the README, model card, and flowchart
+  Mermaid; I edited for voice and trimmed overclaiming.
 
 **b. Judgment and verification**
 
-- Describe one moment where you did not accept an AI suggestion as-is.
-  - Copilot Chat once suggested **folding conflict detection into `DailyPlan` as a method** so every plan would “know” if it conflicted. I **rejected** that as the main design: overlap logic depends on parsing `HH:MM` and comparing intervals—those are **scheduler concerns** (and validation), while `DailyPlan` should stay a **container + presentation** (`explain`, `to_display_rows`). I kept **`detect_time_conflicts` and `scheduling_conflict_warning` on `Scheduler`** so the domain model stays clear: “plan” is data; “scheduler” is the engine that builds and inspects plans.
-- How did you evaluate or verify what the AI suggested?
-  - I **ran** `pytest` after every change that touched scheduling, and I **reread** the half-open overlap rule in code so the AI’s English explanation matched the implementation. If a suggestion didn’t have a clear test hook, I treated it as optional.
-
-### VS Code Copilot: AI strategy
-
-**Which Copilot features were most effective for building your scheduler?**
-
-- **Inline completions (Ghost Text)** — best for **boilerplate** (`dataclass` fields, `sorted(..., key=lambda ...)`, test `assert` blocks) and for **sticking to my own patterns** once I had written one example method.
-- **Copilot Chat** — best for **short explanations** of tricky code (e.g. why `end <= start` adjusts by 24 hours in interval math) and for **drafting a test list** I then trimmed to match `pytest` style.
-- **“Generate tests” / test-focused prompts** — useful as a **starting point** for parametrized edge cases, but I always **edited** expectations to match the real API (`Scheduler`, `CareTask.mark_complete` signatures).
-
-**Give one example of an AI suggestion you rejected or modified to keep your system design clean.**
-
-- Same as above: I **did not** move conflict detection onto `DailyPlan` as a fat model. I kept overlap detection on **`Scheduler`** and left **`DailyPlan`** responsible for **aggregating** `PlanItem`s and **text** output. That preserved a single place for “how do we interpret times?” and avoided mixing validation with display.
-
-**How did using separate chat sessions for different phases help you stay organized?**
-
-- **Phase 1 (UML / domain model):** one thread with **no code**—only classes, relationships, and naming—so I didn’t drift into implementation details.
-- **Phase 2 (core logic):** a fresh thread focused on **`pawpal_system.py`** and tests, so prompts didn’t pull in Streamlit noise.
-- **Phase 3 (UI):** another thread for **`app.py`**, so suggestions were Streamlit-specific (`st.table`, `st.session_state`) and didn’t rewrite backend contracts.
-- **Phase 4 (packaging / README / diagram):** short sessions for **documentation accuracy**, not behavior changes. Starting new chats kept **context windows** focused and reduced “fix the UI” answers when I was asking about **ranking keys**.
-
-**Summarize what you learned about being the "lead architect" when collaborating with powerful AI tools.**
-
-- The model is **fast at volume** but **agnostic to your product boundaries** unless you state them. Being the lead architect means **owning the seams**: which class owns which behavior, what is **tested** vs **assumed**, and when to **say no** to a clever refactor that blurs layers. AI tools are strong **implementers and sparring partners**; they are not substitutes for **requirements, acceptance criteria, and verification**—those stay on you.
-
----
+- One helpful AI suggestion I accepted: Claude pointed out that the
+  existing `CareTask` dataclass already had every field a structured-output
+  prompt would want (`title`, `duration_minutes`, `priority`, `task_type`,
+  `pet_name`, `due_window`, `time`, `is_required`, `frequency`). That
+  observation was the reason I could freeze `pawpal_system.py` instead of
+  rewriting it — a one-line insight that shaped the whole project.
+- One flawed AI suggestion I rejected: after I specified a free
+  HuggingFace-hosted Gemma model, Claude kept suggesting Anthropic-style
+  tool-use framing for the structured output. Gemma does not support that
+  well, and retrofitting it would have been fragile. I redirected toward
+  prompted JSON + Pydantic + repair-retry, which is honestly a stronger
+  rubric fit because the guardrail is more visible. Lesson: the model
+  defaults to its favorite ecosystem unless you pin the constraint.
+- How I verified suggestions were correct: I ran `python -m pytest` after
+  every code change (47 tests, all passing at every phase boundary) and I
+  kept the Streamlit UI running in a second terminal to sanity-check the
+  save flow interactively. When Claude wrote docstrings or README claims,
+  I re-read the code it was describing and removed anything that was
+  aspirational rather than implemented.
 
 ## 4. Testing and Verification
 
-**a. What you tested**
+**a. What I tested**
 
-- What behaviors did you test?
-  - **`CareTask.mark_complete`:** idempotency, daily vs weekly `due_date` advancement, `pet.add_task` for the next instance, non-recurring frequencies.
-  - **`filter_care_tasks` / owner filtering:** completion and pet-name filters.
-  - **`sort_or_rank_tasks`:** chronological ordering when `time` differs.
-  - **`generate_plan`:** capacity limits, unscheduled overflow.
-  - **Conflicts:** `detect_time_conflicts`, `has_time_conflicts`, `scheduling_conflict_warning`—duplicate overlaps, partial overlaps, adjacent non-overlapping slots, malformed times (warning path).
-- Why were these tests important?
-  - They lock down **deterministic ranking**, **recurrence rules**, and **interval math**—the places bugs hide without a human staring at a calendar. UI tests are manual; **unit tests** give confidence the engine is right before wiring Streamlit.
+- **Unchanged core (30 tests)**: carried over from Module 2 —
+  `CareTask.mark_complete` (daily / weekly / once / idempotent),
+  `filter_care_tasks`, `sort_or_rank_tasks`, `generate_plan`,
+  `detect_time_conflicts`, `scheduling_conflict_warning`.
+- **Validators (8 tests)**: `TaskDraft` rejects bad priority, bad
+  task_type, duration out of range, malformed time; normalizes time
+  padding (`8:05 → 08:05`); `TaskDraftList` rejects missing fields.
+- **Architect (10 tests)**: parse clean JSON, strip markdown fences,
+  extract JSON from prose, accept bare list, reject invalid duration;
+  run end-to-end with a mocked LLM to assert pet attachment and plan
+  generation; retry once on bad first response; record an error when
+  both attempts fail; reject invalid enum from both attempts.
+- **Critic (8 tests)**: empty drafts give 0.0 and an error; clean input
+  gives ≥ 0.9; unscheduled tasks and conflict warning downgrade to
+  warning band; unmentioned pet / missed clock time flag info issues;
+  short input flags warning; `Issue` is hashable.
+- **Evaluator (4 tests)**: exact match passes; wrong duration fails;
+  missing matching title fails; case-id filtering works — all with a
+  mocked LLM so the unit suite stays offline.
+- **Golden-set harness**: `python -m ai.evaluator` runs six NL cases
+  through a real Gemma call and prints per-case field-level accuracy,
+  overall pass rate, and average critic confidence.
 
 **b. Confidence**
 
-- How confident are you that your scheduler works correctly?
-  - **High for the behaviors covered by tests** (ranking, feasibility, plan generation, overlap detection, recurrence). **Lower for end-to-end flows** in the browser (session state, multi-step clicks) because those are not automated here.
-- What edge cases would you test next if you had more time?
-  - **Multi-pet** schedules with tasks on different pets and **shared** capacity.
-  - **Preference edge cases:** empty `exclude_task_types`, availability dict with `False` for a slot.
-  - **Property-style** checks: greedy generator never produces overlapping items (invariant).
-
----
+- **High** for the schema/guardrail layer: Pydantic, repair retry, and
+  conflict detection are deterministic and covered by unit tests.
+- **Medium** for the end-to-end NL-to-plan path: the golden-set passes
+  around 5/6 cases on typical runs with 85–95% field accuracy, and the
+  failing case is usually a pet-name coverage issue, not a structural
+  bug.
+- **Lower** for edge cases the suite does not yet cover: adversarial
+  prompts that try prompt injection, very long inputs, mixed-language
+  inputs, and multi-pet disambiguation in the UI.
 
 ## 5. Reflection
 
 **a. What went well**
 
-- What part of this project are you most satisfied with?
-  - The **clear split** between `DailyPlan` / `PlanItem` (what we show) and `Scheduler` (how we build and validate), plus **tests** that encode the trickiest rules (overlap, recurrence).
+- The **strict separation** between the AI layer and the core. Every
+  promise I made about "the scheduler is unchanged" is literally true —
+  47 tests still pass, 30 of them against pre-capstone code I did not
+  touch. That made documentation honest and demos believable.
+- The **critic + Pydantic pairing**. Early Gemma runs emitted
+  `priority: "Urgent"` (title-cased) and `duration_minutes: "10"`
+  (stringified). I initially expected to solve this with better prompts
+  but the validator caught it on the first pass and the repair retry
+  cleaned it up on the second. Being *strict early* was cheaper than
+  being *smart later*.
 
-**b. What you would improve**
+**b. What I would improve**
 
-- If you had another iteration, what would you improve or redesign?
-  - **Richer reasons** on each `PlanItem` (today the reason string is generic), and **optional** UI controls for `day_start` and excluded types so the Streamlit demo exercises **preferences** without code edits.
+- **Multi-pet save flow** — the architect can already emit multiple
+  `pet_name` values, but the Streamlit UI collapses them to the active
+  pet. Building a proper pet selector and per-pet routing would remove
+  one of my larger caveats.
+- **Semantic critic** — a lightweight species/age grounding (even a
+  small static rules file, before full RAG) would let the critic flag
+  "25-min walk for a hamster" instead of treating it as plausible.
+- **Persistent storage** — saved plans currently live in
+  `st.session_state` and are lost on refresh. Swapping to SQLite would
+  be small and would make the demo feel more real.
 
 **c. Key takeaway**
 
-- What is one important thing you learned about designing systems or working with AI on this project?
-  - **Small, testable modules beat “smart” monoliths**—and AI accelerates coding **when** you already know the boundaries you want; the hard part is still **deciding** those boundaries and **proving** them with tests.
+- **Your validators are your trust boundary.** The LLM is fast and
+  flexible; the strict things around it (Pydantic schema, deterministic
+  critic, per-draft human approval, conflict detection inherited from
+  the original scheduler) are what make the output safe to act on. As
+  the lead architect, my job was less about prompting the model well
+  and more about **designing the seams** that catch it when it is
+  wrong — and then **leaving the human in the loop** for everything
+  those seams cannot prove.
